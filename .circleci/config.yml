@@ -662,6 +662,11 @@ jobs:
     steps:
       - run_test:
           pattern: "graphql"
+  graphene:
+    <<: *contrib_job_small
+    steps:
+      - run_test:
+          pattern: "graphene"
           snapshot: true
 
   grpc:
@@ -1154,6 +1159,7 @@ workflows:
       - futures: *requires_base_venvs
       - gevent: *requires_base_venvs
       - graphql: *requires_base_venvs
+      - graphene: *requires_base_venvs
       - grpc: *requires_base_venvs
       - httplib: *requires_base_venvs
       - httpx: *requires_base_venvs
