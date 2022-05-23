@@ -24,8 +24,13 @@ from ...ext import SpanTypes
 config._add("graphql", dict(_default_service="graphql"))
 
 
-graphql_version_str = getattr(graphql, "__version__", "0.0.0")
+graphql_version_str = getattr(graphql, "__version__")
 graphql_version = parse_version(graphql_version_str)
+
+if graphql_version < (3, 0):
+    from graphql.language.ast import Document
+else:
+    from graphql.language.ast import DocumentNode as Document
 
 
 def patch():
@@ -34,36 +39,51 @@ def patch():
 
     setattr(graphql, "_datadog_patch", True)
 
-    graphql_module = "graphql.graphql"
-    graphql_func = "graphql_impl"
+    # patch graphql query
     if graphql_version < (3, 0):
-        graphql_module = "graphql"
-        graphql_func = "graphql"
+        _w("graphql.graphql", "execute_graphql", _traced_operation("graphql.query"))
+    else:
+        _w("graphql.graphql", "graphql_impl", _traced_operation("graphql.query"))
 
-    parse_execute_module = "graphql.graphql"
-    if (2, 1) <= graphql_version < (3, 0):
-        parse_execute_module = "graphql.backend.core"
-
-    validate_module = "graphql.validation"
+    # patch parse
     if graphql_version < (2, 1):
-        validate_module = "graphql.graphql"
-    elif (2, 1) <= graphql_version < (3, 0):
-        validate_module = "graphql.backend.core"
+        _w("graphql.graphql", "parse", _traced_operation("graphql.parse"))
+    elif graphql_version < (3, 0):
+        _w("graphql.backend.core", "parse", _traced_operation("graphql.parse"))
+    else:
+        _w("graphql.graphql", "parse", _traced_operation("graphql.parse"))
 
-    resolve_module = "graphql.execution.execute"
-    # ExecutionContext.resolve_field was renamed to execute_field in graphql-core 3.2
-    resolve_func = "ExecutionContext.execute_field"
+    # patch validate
+    if graphql_version < (2, 1):
+        _w("graphql.graphql", "validate", _traced_operation("graphql.validate"))
+    elif graphql_version < (3, 0):
+        _w("graphql.backend.core", "validate", _traced_operation("graphql.validate"))
+    else:
+        _w("graphql.validation", "validate", _traced_operation("graphql.validate"))
+
+    # patch execute function used in graphql.graphql
+    if (2, 1) <= graphql_version < (3, 0):
+        _w("graphql.backend.core", "execute", _traced_operation("graphql.execute"))
+    else:
+        _w("graphql.graphql", "execute", _traced_operation("graphql.execute"))
+
+    # Patch execute functions exposed in the public api
+    _w("graphql", "execute", _traced_operation("graphql.execute"))
+    _w("graphql.execution", "execute", _traced_operation("graphql.execute"))
     if graphql_version < (3, 0):
-        resolve_module = "graphql.execution.executor"
-        resolve_func = "resolve_field"
-    elif graphql_version < (3, 2):
-        resolve_func = "ExecutionContext.resolve_field"
+        _w("graphql.execution.executor", "execute", _traced_operation("graphql.execute"))
+    elif graphql_version >= (3, 1):
+        _w("graphql", "execute_sync", _traced_operation("graphql.execute"))
+        _w("graphql.execution", "execute_sync", _traced_operation("graphql.execute"))
 
-    _w(graphql_module, graphql_func, _traced_operation("graphql.query"))
-    _w(parse_execute_module, "parse", _traced_operation("graphql.parse"))
-    _w(validate_module, "validate", _traced_operation("graphql.validate"))
-    _w(parse_execute_module, "execute", _traced_operation("graphql.execute"))
-    _w(resolve_module, resolve_func, _traced_operation("graphql.resolve"))
+    # patch resolvers
+    if graphql_version < (3, 0):
+        _w("graphql.execution.executor", "resolve_field", _traced_operation("graphql.resolve"))
+    elif graphql_version < (3, 2):
+        _w("graphql.execution.execute", "ExecutionContext.resolve_field", _traced_operation("graphql.resolve"))
+    else:
+        # ExecutionContext.resolve_field was renamed to execute_field in graphql-core 3.2
+        _w("graphql.execution.execute", "ExecutionContext.execute_field", _traced_operation("graphql.resolve"))
 
     Pin().onto(graphql)
 
@@ -94,10 +114,12 @@ def _traced_operation(span_name):
 
 
 def _get_resource(span_name, f_args, f_kwargs):
-    if span_name == "graphql.resolve":
+    if span_name == "graphql.query":
+        return _get_source_from_query(f_args, f_kwargs)
+    elif span_name == "graphql.execute":
+        return _get_source_from_execute(f_args, f_kwargs)
+    elif span_name == "graphql.resolve":
         return _get_resolver_field_name(f_args, f_kwargs)
-    elif span_name == "graphql.query":
-        return _get_source_str(f_args, f_kwargs)
     return span_name
 
 
@@ -110,14 +132,28 @@ def _init_span(span):
         span.set_tag(ANALYTICS_SAMPLE_RATE_KEY, sample_rate)
 
 
-def _get_source_str(f_args, f_kwargs):
+def _get_source_from_query(f_args, f_kwargs):
     # type: (Any, Any) -> str
-    source = get_argument_value(f_args, f_kwargs, 1, "source")  # type: Union[str, Source]
+    source = get_argument_value(f_args, f_kwargs, 1, "source")  # type: Union[Document, str, Source]
+    source_str = ""
     if isinstance(source, Source):
         source_str = source.body
-    else:
+    elif isinstance(source, str):
         source_str = source
+    else:  # Document
+        source_str = source.loc.source.body
     # remove new lines, tabs and extra whitespace from source_str
+    return re.sub(r"\s+", " ", source_str).strip()
+
+
+def _get_source_from_execute(f_args, f_kwargs):
+    # type: (Any, Any) -> str
+    if graphql_version < (3, 0):
+        document = get_argument_value(f_args, f_kwargs, 1, "document_ast")
+    else:
+        document = get_argument_value(f_args, f_kwargs, 1, "document")
+
+    source_str = document.loc.source.body
     return re.sub(r"\s+", " ", source_str).strip()
 
 
@@ -138,10 +174,16 @@ def _get_resolver_field_name(f_args, f_kwargs):
 
 def _set_span_errors(result, span):
     # type: (Any, Span) -> None
-    if not isinstance(result, ExecutionResult) or not result.errors:
+    if isinstance(result, list) and result and isinstance(result[0], GraphQLError):
+        # graphql.valdidate spans wraps functions which returns a list of GraphQLErrors
+        errors = result
+    elif isinstance(result, ExecutionResult) and result.errors:
+        # graphql.execute and graphql.query wrap an ExecutionResult
+        # which contains a list of errors
+        errors = result.errors
+    else:
+        # do nothing for wrapped functions which do not return a list of errors
         return
 
-    error_msgs = ""
-    for error in result.errors:
-        error_msgs = "%s\n%s" % (error_msgs, stringify(error))
-    span.set_exc_fields(GraphQLError, error_msgs.strip(), "")
+    error_msgs = "\n".join([stringify(error) for error in errors])
+    span.set_exc_fields(GraphQLError, error_msgs, "")
