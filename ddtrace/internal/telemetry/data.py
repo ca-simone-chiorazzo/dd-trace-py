@@ -62,8 +62,16 @@ def _get_application(key):
 
 def get_dependencies():
     # type: () -> List[Dict[str, str]]
-    """Creates a list of dictionaries to store the name and version of all installed packages"""
-    return [{"name": dist.name, "version": dist.version} for dist in get_distributions()]
+    """Returns a unique list of the names and versions of all installed packages"""
+    deps_added = set()
+    dependencies = []
+    for dist in get_distributions():
+        dependency = (dist.name, dist.version)
+        if dependency not in deps_added:
+            dependencies.append({"name": dependency[0], "version": dependency[1]})
+        deps_added.add(dependency)
+
+    return dependencies
 
 
 def get_application(service, version, env):
