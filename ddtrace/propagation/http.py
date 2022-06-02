@@ -143,9 +143,7 @@ class _DatadogMultiHeader:
 
         # Only propagate trace tags which means ignoring the _dd.origin
         tags_to_encode = {
-            # DEV: We need to coerce here as trace tags are implemented on top
-            # of context tags which is implemented using the same type
-            # internally (_MetaDictType) as span tags.
+            # DEV: Context._meta is a _MetaDictType but we need Dict[str, str]
             ensure_str(k): ensure_str(v)
             for k, v in span_context._meta.items()
             if _DatadogMultiHeader.is_valid_datadog_trace_tag_key(k)
