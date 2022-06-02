@@ -113,7 +113,7 @@ class _DatadogMultiHeader:
     _X_DATADOG_TAGS_EXTRACT_REJECT = frozenset(["_dd.p.upstream_services"])
 
     @staticmethod
-    def is_valid_datadog_trace_tag_key(key):
+    def _is_valid_datadog_trace_tag_key(key):
         return key.startswith("_dd.p.")
 
     @staticmethod
